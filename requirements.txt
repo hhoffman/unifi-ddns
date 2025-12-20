@@ -1,0 +1,11 @@
+# Cloudflare API client
+cloudflare>=4.0.0
+
+# UniFi Controller API client
+unifi-controller-api>=0.1.0
+
+# YAML configuration parsing
+PyYAML>=6.0
+
+# HTTP requests for UniFi API
+requests>=2.31.0

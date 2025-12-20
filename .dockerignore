@@ -1,0 +1,20 @@
+# Don't include these in the Docker image
+# config.yaml - Now included in Docker image for volume-less deployment
+logs/
+*.log
+.git
+.gitignore
+README.md
+install.sh
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.vscode/
+.idea/
+*.swp
+.DS_Store

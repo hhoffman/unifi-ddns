@@ -1,0 +1,60 @@
+services:
+  cloudflare-ddns:
+    build: .
+    container_name: cloudflare-ddns
+
+    # Use host network mode to access host's network interfaces
+    network_mode: host
+
+    # Restart policy - restart every 5 minutes to check for IP changes
+    # Alternative: use a cron container or external cron
+    restart: unless-stopped
+
+    volumes:
+      # Use named volume for logs
+      - ddns-logs:/app/logs
+
+    environment:
+      # Optional: set timezone
+      - TZ=America/New_York
+
+    # Run script every 5 minutes
+    # We use a wrapper script to loop
+    command: sh -c 'while true; do python3 cloudflare_ddns.py; sleep 300; done'
+
+    # Security options (optional)
+    security_opt:
+      - no-new-privileges:true
+
+    # Resource limits (optional)
+    mem_limit: 128m
+    cpus: 0.5
+
+volumes:
+  ddns-logs:
+
+  # Alternative: Use ofelia for cron-like scheduling
+  # Uncomment if you prefer true cron scheduling
+  #
+  # cloudflare-ddns-cron:
+  #   build: .
+  #   container_name: cloudflare-ddns-cron
+  #   network_mode: host
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./config.yaml:/app/config.yaml:ro
+  #     - ./logs:/app/logs
+  #   labels:
+  #     ofelia.enabled: "true"
+  #     ofelia.job-exec.ddns.schedule: "@every 5m"
+  #     ofelia.job-exec.ddns.command: "python3 cloudflare_ddns.py"
+  #
+  # ofelia:
+  #   image: mcuadros/ofelia:latest
+  #   container_name: ofelia
+  #   depends_on:
+  #     - cloudflare-ddns-cron
+  #   command: daemon --docker
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #   restart: unless-stopped

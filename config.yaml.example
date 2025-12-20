@@ -1,0 +1,93 @@
+# Cloudflare DDNS Configuration Example
+# Copy this file to config.yaml and fill in your values
+
+# UniFi Controller Configuration
+unifi:
+  # UDM Pro hostname or IP address
+  host: "192.168.1.1"
+
+  # UniFi Controller port (default: 443)
+  port: 443
+
+  # Site name (default is usually "default")
+  site: "default"
+
+  # Authentication method 1: API Key (Recommended)
+  # Generate at: Settings → Admins → [Your User] → API Keys
+  api_key: "your_unifi_api_key_here"
+
+  # Authentication method 2: Username/Password (if no API key)
+  # Uncomment and use if your controller doesn't support API keys
+  # username: "admin"
+  # password: "your_password_here"
+
+  # Verify SSL certificate (set to false for self-signed certs)
+  verify_ssl: false
+
+# Cloudflare API Configuration
+cloudflare:
+  # API token with Zone:DNS:Edit permissions
+  # Create at: https://dash.cloudflare.com/profile/api-tokens
+  api_token: "your_cloudflare_api_token_here"
+
+  # Alternative: use environment variable
+  # api_token_env: "CF_API_TOKEN"
+
+# Logging Configuration
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: /app/logs/ddns.log  # Use /app/logs in Docker
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
+  format: json  # json or text
+
+# DNS Update Settings
+settings:
+  ttl: 120  # DNS TTL in seconds (120 = 2 minutes, good for dynamic IPs)
+  only_update_if_changed: true  # Skip API call if IP hasn't changed
+
+# Device to DNS Record Mappings
+# Map UniFi devices (by MAC address) to Cloudflare DNS records
+devices:
+  # Example 1: Docker server with both IPv4 and IPv6
+  - mac: "aa:bb:cc:dd:ee:ff"
+    name: "Docker Server 01"  # Friendly name for logs
+    records:
+      - domain: example.com
+        hostname: docker01.example.com
+        ipv4: true
+        ipv6: true
+
+  # Example 2: Web server with only IPv4
+  - mac: "11:22:33:44:55:66"
+    name: "Web Server"
+    records:
+      - domain: example.com
+        hostname: web.example.com
+        ipv4: true
+        ipv6: false
+
+  # Example 3: Multiple DNS records for one device
+  - mac: "77:88:99:aa:bb:cc"
+    name: "Multi-hostname Server"
+    records:
+      # Primary hostname
+      - domain: example.com
+        hostname: server.example.com
+        ipv4: true
+        ipv6: true
+
+      # Alternate hostname (www)
+      - domain: example.com
+        hostname: www.example.com
+        ipv4: true
+        ipv6: true
+
+  # Add more devices as needed
+  # - mac: "device_mac_address"
+  #   name: "Friendly Name"
+  #   records:
+  #     - domain: your-domain.com
+  #       hostname: subdomain.your-domain.com
+  #       ipv4: true
+  #       ipv6: true
