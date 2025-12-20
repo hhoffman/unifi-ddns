@@ -26,7 +26,10 @@ unifi:
 
 # Cloudflare API Configuration
 cloudflare:
-  # API token with Zone:DNS:Edit permissions
+  # API token with the following permissions for your domain:
+  # - Zone:Read (to lookup zone ID)
+  # - DNS:Read (to check existing records)
+  # - DNS:Edit (to create/update records)
   # Create at: https://dash.cloudflare.com/profile/api-tokens
   api_token: "your_cloudflare_api_token_here"
 
