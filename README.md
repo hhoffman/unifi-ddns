@@ -73,10 +73,16 @@ This application runs as a Docker container and checks for IP changes every 5 mi
 1. Log in to your Cloudflare account
 2. Go to Profile → API Tokens → Create Token
 3. Use the "Edit zone DNS" template
-4. Configure:
-   - **Permissions**: Zone → DNS → Edit
+4. Configure permissions:
+   - **Zone → Zone → Read**: Required to lookup zone ID
+   - **Zone → DNS → Read**: Required to check existing DNS records
+   - **Zone → DNS → Edit**: Required to create/update DNS records
+5. Configure zone resources:
    - **Zone Resources**: Include → Specific zone → Select your domain
-5. Copy the generated token
+6. Copy the generated token
+
+**Required Permissions Summary:**
+- Zone:Read, DNS:Read, DNS:Edit for the specific domain(s) you want to update
 
 #### Creating a UniFi API Key
 
