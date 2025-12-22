@@ -34,6 +34,12 @@ RUN useradd -m -u 1000 ddns && \
 # Switch to non-root user
 USER ddns
 
+# Healthcheck: Verify the script ran recently by checking log modification time
+# Checks every 6 minutes, allows up to 10 minutes since last run (one missed cycle)
+HEALTHCHECK --interval=6m --timeout=10s --start-period=30s --retries=2 \
+  CMD test -f /app/logs/ddns.log && \
+      test $(find /app/logs/ddns.log -mmin -10 | wc -l) -eq 1 || exit 1
+
 # Default command runs the script once
 # For continuous operation, use cron or run via docker-compose with restart policy
 CMD ["python3", "cloudflare_ddns.py"]
