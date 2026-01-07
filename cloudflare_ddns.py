@@ -111,20 +111,24 @@ class ConfigManager:
         if not self.config:
             raise ConfigurationError("Configuration is empty")
 
-        # Required top-level keys
-        required_keys = ['unifi', 'cloudflare', 'devices']
+        # Required top-level keys (unifi is now optional if only using 'wan' sources)
+        required_keys = ['cloudflare', 'devices']
         for key in required_keys:
             if key not in self.config:
                 raise ConfigurationError(f"Missing required config key: {key}")
 
-        # Validate UniFi section
-        unifi = self.config['unifi']
-        if 'host' not in unifi:
-            raise ConfigurationError("Missing 'host' in unifi section")
-        if 'api_key' not in unifi and ('username' not in unifi or 'password' not in unifi):
-            raise ConfigurationError(
-                "Must provide either 'api_key' or both 'username' and 'password' in unifi section"
-            )
+        # Validate UniFi section (only required if any device uses 'device' source)
+        needs_unifi = self._config_needs_unifi()
+        if needs_unifi:
+            if 'unifi' not in self.config:
+                raise ConfigurationError("UniFi config required when using 'device' IP source")
+            unifi = self.config['unifi']
+            if 'host' not in unifi:
+                raise ConfigurationError("Missing 'host' in unifi section")
+            if 'api_key' not in unifi and ('username' not in unifi or 'password' not in unifi):
+                raise ConfigurationError(
+                    "Must provide either 'api_key' or both 'username' and 'password' in unifi section"
+                )
 
         # Validate Cloudflare section
         cf = self.config['cloudflare']
@@ -136,19 +140,77 @@ class ConfigManager:
             raise ConfigurationError("Must configure at least one device")
 
         for idx, device in enumerate(self.config['devices']):
-            if 'mac' not in device:
-                raise ConfigurationError(f"Device at index {idx} missing 'mac' field")
+            device_name = device.get('name', f'device_{idx}')
+            has_mac = 'mac' in device
+
             if 'records' not in device or not device['records']:
-                raise ConfigurationError(f"Device with MAC '{device.get('mac', idx)}' has no records")
+                raise ConfigurationError(f"Device '{device_name}' has no records")
 
             # Validate each record
             for rec_idx, record in enumerate(device['records']):
-                required_record_keys = ['domain', 'hostname', 'ipv4', 'ipv6']
-                for key in required_record_keys:
-                    if key not in record:
-                        raise ConfigurationError(
-                            f"Record {rec_idx} in device '{device['mac']}' missing '{key}' field"
-                        )
+                self._validate_record(record, rec_idx, device_name, has_mac)
+
+    def _config_needs_unifi(self) -> bool:
+        """Check if any device/record requires UniFi API (uses 'device' source)."""
+        for device in self.config.get('devices', []):
+            for record in device.get('records', []):
+                ipv4 = record.get('ipv4')
+                ipv6 = record.get('ipv6')
+                # 'device' or True (backward compat) requires UniFi
+                if ipv4 in ('device', True) or ipv6 in ('device', True):
+                    return True
+        return False
+
+    def _validate_record(self, record: Dict[str, Any], rec_idx: int, device_name: str, has_mac: bool) -> None:
+        """Validate a single DNS record configuration."""
+        # domain and hostname are always required
+        for key in ['domain', 'hostname']:
+            if key not in record:
+                raise ConfigurationError(
+                    f"Record {rec_idx} in device '{device_name}' missing '{key}' field"
+                )
+
+        has_cname = 'cname' in record
+        ipv4_val = record.get('ipv4')
+        ipv6_val = record.get('ipv6')
+
+        # CNAME is mutually exclusive with ipv4/ipv6
+        if has_cname and (ipv4_val or ipv6_val):
+            raise ConfigurationError(
+                f"Record {rec_idx} in device '{device_name}': 'cname' cannot be used with 'ipv4' or 'ipv6'"
+            )
+
+        # Must have at least one of: ipv4, ipv6, cname
+        if not has_cname and not ipv4_val and not ipv6_val:
+            raise ConfigurationError(
+                f"Record {rec_idx} in device '{device_name}' must have at least one of: ipv4, ipv6, cname"
+            )
+
+        # Validate ipv4 value
+        if ipv4_val:
+            valid_ipv4 = (True, False, 'wan', 'device')
+            if ipv4_val not in valid_ipv4:
+                raise ConfigurationError(
+                    f"Record {rec_idx} in device '{device_name}': ipv4 must be 'wan', 'device', true, or false"
+                )
+            # 'device' or True requires MAC
+            if ipv4_val in ('device', True) and not has_mac:
+                raise ConfigurationError(
+                    f"Record {rec_idx} in device '{device_name}': ipv4='device' requires device to have 'mac'"
+                )
+
+        # Validate ipv6 value
+        if ipv6_val:
+            valid_ipv6 = (True, False, 'wan', 'device')
+            if ipv6_val not in valid_ipv6:
+                raise ConfigurationError(
+                    f"Record {rec_idx} in device '{device_name}': ipv6 must be 'wan', 'device', true, or false"
+                )
+            # 'device' or True requires MAC
+            if ipv6_val in ('device', True) and not has_mac:
+                raise ConfigurationError(
+                    f"Record {rec_idx} in device '{device_name}': ipv6='device' requires device to have 'mac'"
+                )
 
     def get_cloudflare_api_token(self) -> str:
         """Get Cloudflare API token from config or environment."""
@@ -286,6 +348,60 @@ class UniFiClient:
         return None
 
 
+# External IP Fetcher
+class ExternalIPFetcher:
+    """Fetches WAN IP addresses from external services."""
+
+    DEFAULT_IPV4_URL = "https://api.ipify.org"
+    DEFAULT_IPV6_URL = "https://api6.ipify.org"
+
+    def __init__(self, config: Dict[str, Any], logger: logging.Logger):
+        self.logger = logger
+        ext_config = config.get('external_ip', {})
+        self.ipv4_url = ext_config.get('ipv4_url', self.DEFAULT_IPV4_URL)
+        self.ipv6_url = ext_config.get('ipv6_url', self.DEFAULT_IPV6_URL)
+
+        # Cache for IPs (fetched once per run)
+        self._ipv4_cache: Optional[str] = None
+        self._ipv6_cache: Optional[str] = None
+        self._ipv4_fetched = False
+        self._ipv6_fetched = False
+
+    def get_ipv4(self) -> Optional[str]:
+        """Fetch WAN IPv4 address from external service."""
+        if self._ipv4_fetched:
+            return self._ipv4_cache
+
+        self._ipv4_fetched = True
+        try:
+            self.logger.debug(f"Fetching WAN IPv4 from {self.ipv4_url}")
+            response = requests.get(self.ipv4_url, timeout=10)
+            response.raise_for_status()
+            self._ipv4_cache = response.text.strip()
+            self.logger.info(f"WAN IPv4: {self._ipv4_cache}")
+            return self._ipv4_cache
+        except requests.RequestException as e:
+            self.logger.warning(f"Failed to fetch WAN IPv4 from {self.ipv4_url}: {e}")
+            return None
+
+    def get_ipv6(self) -> Optional[str]:
+        """Fetch WAN IPv6 address from external service."""
+        if self._ipv6_fetched:
+            return self._ipv6_cache
+
+        self._ipv6_fetched = True
+        try:
+            self.logger.debug(f"Fetching WAN IPv6 from {self.ipv6_url}")
+            response = requests.get(self.ipv6_url, timeout=10)
+            response.raise_for_status()
+            self._ipv6_cache = response.text.strip()
+            self.logger.info(f"WAN IPv6: {self._ipv6_cache}")
+            return self._ipv6_cache
+        except requests.RequestException as e:
+            self.logger.warning(f"Failed to fetch WAN IPv6 from {self.ipv6_url}: {e}")
+            return None
+
+
 # Cloudflare Client
 class CloudflareClient:
     """Manages Cloudflare API interactions."""
@@ -361,9 +477,10 @@ class CloudflareClient:
         zone_id: str,
         record_id: str,
         name: str,
-        ip: str,
+        content: str,
         record_type: str,
-        ttl: int = 120
+        ttl: int = 120,
+        proxied: bool = False
     ) -> Any:
         """
         Update existing DNS record.
@@ -372,9 +489,10 @@ class CloudflareClient:
             zone_id: Cloudflare zone ID
             record_id: DNS record ID
             name: Full hostname
-            ip: IP address to set
-            record_type: 'A' or 'AAAA'
+            content: Record content (IP for A/AAAA, target hostname for CNAME)
+            record_type: 'A', 'AAAA', or 'CNAME'
             ttl: TTL in seconds
+            proxied: Whether to proxy through Cloudflare
 
         Returns:
             Updated DNSRecord
@@ -383,15 +501,15 @@ class CloudflareClient:
             CloudflareAPIError: If update fails
         """
         try:
-            self.logger.info(f"Updating {record_type} record for {name} to {ip}")
+            self.logger.info(f"Updating {record_type} record for {name} to {content}")
             record = self.client.dns.records.update(
                 dns_record_id=record_id,
                 zone_id=zone_id,
                 name=name,
-                content=ip,
+                content=content,
                 type=record_type,
                 ttl=ttl,
-                proxied=False  # Don't proxy DDNS records
+                proxied=proxied
             )
             return record
 
@@ -402,9 +520,10 @@ class CloudflareClient:
         self,
         zone_id: str,
         name: str,
-        ip: str,
+        content: str,
         record_type: str,
-        ttl: int = 120
+        ttl: int = 120,
+        proxied: bool = False
     ) -> Any:
         """
         Create new DNS record.
@@ -412,9 +531,10 @@ class CloudflareClient:
         Args:
             zone_id: Cloudflare zone ID
             name: Full hostname
-            ip: IP address to set
-            record_type: 'A' or 'AAAA'
+            content: Record content (IP for A/AAAA, target hostname for CNAME)
+            record_type: 'A', 'AAAA', or 'CNAME'
             ttl: TTL in seconds
+            proxied: Whether to proxy through Cloudflare
 
         Returns:
             Created DNSRecord
@@ -423,14 +543,14 @@ class CloudflareClient:
             CloudflareAPIError: If creation fails
         """
         try:
-            self.logger.info(f"Creating {record_type} record for {name} with {ip}")
+            self.logger.info(f"Creating {record_type} record for {name} with {content}")
             record = self.client.dns.records.create(
                 zone_id=zone_id,
                 name=name,
-                content=ip,
+                content=content,
                 type=record_type,
                 ttl=ttl,
-                proxied=False
+                proxied=proxied
             )
             return record
 
@@ -446,8 +566,13 @@ class DDNSUpdater:
         self.config = config
         self.logger = logger
 
-        # Initialize UniFi client (for device queries)
-        self.unifi_client = UniFiClient(config['unifi'], logger)
+        # Initialize UniFi client only if needed
+        self.unifi_client: Optional[UniFiClient] = None
+        if 'unifi' in config:
+            self.unifi_client = UniFiClient(config['unifi'], logger)
+
+        # Initialize External IP fetcher
+        self.external_ip = ExternalIPFetcher(config, logger)
 
         # Initialize Cloudflare client
         config_manager = ConfigManager()
@@ -477,7 +602,7 @@ class DDNSUpdater:
                     exc_info=True,
                     extra={
                         'device': device_config.get('name', 'unknown'),
-                        'mac': device_config.get('mac', 'unknown')
+                        'mac': device_config.get('mac', 'N/A')
                     }
                 )
                 total_errors += 1
@@ -486,6 +611,15 @@ class DDNSUpdater:
             f"DDNS update complete: {total_updates} updates, {total_errors} errors"
         )
 
+    def _device_needs_unifi(self, device_config: Dict[str, Any]) -> bool:
+        """Check if device has any records that need UniFi API."""
+        for record in device_config.get('records', []):
+            ipv4 = record.get('ipv4')
+            ipv6 = record.get('ipv6')
+            if ipv4 in ('device', True) or ipv6 in ('device', True):
+                return True
+        return False
+
     def process_device(self, device_config: Dict[str, Any]) -> tuple:
         """
         Process single device with comprehensive error handling.
@@ -493,107 +627,84 @@ class DDNSUpdater:
         Returns:
             tuple: (update_count, error_count)
         """
-        mac = device_config['mac']
-        device_name = device_config.get('name', mac)
+        mac = device_config.get('mac')
+        device_name = device_config.get('name', mac or 'unnamed')
         updates = 0
         errors = 0
 
-        try:
-            # Get device info from UniFi
-            self.logger.debug(f"Processing device: {device_name} ({mac})")
-            client_info = self.unifi_client.get_client_by_mac(mac)
+        # Get device IPs from UniFi if needed
+        device_ipv4 = None
+        device_ipv6 = None
 
-            if not client_info:
-                self.logger.warning(f"Device {device_name} ({mac}) not found in UniFi")
-                return (updates, errors)
+        if self._device_needs_unifi(device_config):
+            if not mac:
+                self.logger.error(f"Device '{device_name}' uses 'device' IP source but has no MAC address")
+                return (updates, 1)
 
-            ipv4 = client_info.get('ip')
-            ipv6 = client_info.get('ip6')
+            if not self.unifi_client:
+                self.logger.error(f"UniFi client not configured but device '{device_name}' needs it")
+                return (updates, 1)
 
-            if not ipv4 and not ipv6:
-                self.logger.warning(f"No IPs found for device {device_name} ({mac})")
-                return (updates, errors)
+            try:
+                self.logger.debug(f"Processing device: {device_name} ({mac})")
+                client_info = self.unifi_client.get_client_by_mac(mac)
 
-            self.logger.info(
-                f"Found device {device_name} ({mac}): IPv4={ipv4}, IPv6={ipv6}"
-            )
-
-            # Process each DNS record
-            for record_config in device_config['records']:
-                try:
-                    ips = {'ipv4': ipv4, 'ipv6': ipv6}
-                    if self.update_dns_record(ips, record_config, device_name, mac):
-                        updates += 1
-                except CloudflareAPIError as e:
-                    self.logger.error(
-                        f"Cloudflare API error updating {record_config['hostname']}: {e}",
-                        extra={
-                            'device': device_name,
-                            'mac': mac,
-                            'record': record_config['hostname']
-                        }
+                if not client_info:
+                    self.logger.warning(f"Device {device_name} ({mac}) not found in UniFi")
+                    # Continue processing - might have wan-only records
+                else:
+                    device_ipv4 = client_info.get('ip')
+                    device_ipv6 = client_info.get('ip6')
+                    self.logger.info(
+                        f"Found device {device_name} ({mac}): IPv4={device_ipv4}, IPv6={device_ipv6}"
                     )
-                    errors += 1
-                except Exception as e:
-                    self.logger.error(
-                        f"Unexpected error updating {record_config['hostname']}: {e}",
-                        exc_info=True,
-                        extra={
-                            'device': device_name,
-                            'mac': mac,
-                            'record': record_config['hostname']
-                        }
-                    )
-                    errors += 1
+            except UniFiAPIError as e:
+                self.logger.error(f"UniFi API error for device {device_name} ({mac}): {e}")
+                errors += 1
+                # Continue processing - might have wan-only records
 
-        except UniFiAPIError as e:
-            self.logger.error(f"UniFi API error for device {device_name} ({mac}): {e}")
-            errors += 1
-        except Exception as e:
-            self.logger.error(
-                f"Failed to process device {device_name} ({mac}): {e}",
-                exc_info=True
-            )
-            errors += 1
+        # Process each DNS record
+        for record_config in device_config['records']:
+            try:
+                if self.process_record(record_config, device_name, device_ipv4, device_ipv6):
+                    updates += 1
+            except CloudflareAPIError as e:
+                self.logger.error(
+                    f"Cloudflare API error updating {record_config['hostname']}: {e}",
+                    extra={
+                        'device': device_name,
+                        'record': record_config['hostname']
+                    }
+                )
+                errors += 1
+            except Exception as e:
+                self.logger.error(
+                    f"Unexpected error updating {record_config['hostname']}: {e}",
+                    exc_info=True,
+                    extra={
+                        'device': device_name,
+                        'record': record_config['hostname']
+                    }
+                )
+                errors += 1
 
         return (updates, errors)
 
-    def update_dns_record(
+    def process_record(
         self,
-        ips: Dict[str, Optional[str]],
         record_config: Dict[str, Any],
         device_name: str,
-        mac: str
+        device_ipv4: Optional[str],
+        device_ipv6: Optional[str]
     ) -> bool:
         """
-        Update Cloudflare DNS record.
+        Process a single DNS record.
 
         Returns:
             bool: True if any update was performed
         """
         hostname = record_config['hostname']
         domain = record_config['domain']
-        update_ipv4 = record_config.get('ipv4', False)
-        update_ipv6 = record_config.get('ipv6', False)
-
-        return self._update_cloudflare_record(
-            ips, hostname, domain, update_ipv4, update_ipv6, device_name
-        )
-
-    def _update_cloudflare_record(
-        self,
-        ips: Dict[str, Optional[str]],
-        hostname: str,
-        domain: str,
-        update_ipv4: bool,
-        update_ipv6: bool,
-        device_name: str
-    ) -> bool:
-        """Update Cloudflare DNS records."""
-        if not self.cf_client:
-            self.logger.error("Cloudflare client not initialized")
-            return False
-
         updated = False
 
         # Get zone ID
@@ -603,25 +714,70 @@ class DDNSUpdater:
             self.logger.error(f"Failed to get zone ID for {domain}: {e}")
             raise
 
-        # Update IPv4 (A record)
-        if update_ipv4 and ips['ipv4']:
-            if self._update_cloudflare_record_helper(zone_id, hostname, ips['ipv4'], 'A'):
+        # Handle CNAME records
+        cname_target = record_config.get('cname')
+        if cname_target:
+            if self._update_dns_record(zone_id, hostname, cname_target, 'CNAME'):
                 updated = True
-        elif update_ipv4 and not ips['ipv4']:
-            self.logger.debug(f"No IPv4 available for {device_name}, skipping Cloudflare A record for {hostname}")
+            return updated
 
-        # Update IPv6 (AAAA record)
-        if update_ipv6 and ips['ipv6']:
-            if self._update_cloudflare_record_helper(zone_id, hostname, ips['ipv6'], 'AAAA'):
-                updated = True
-        elif update_ipv6 and not ips['ipv6']:
-            self.logger.debug(f"No IPv6 available for {device_name}, skipping Cloudflare AAAA record for {hostname}")
+        # Handle A record (IPv4)
+        ipv4_source = record_config.get('ipv4')
+        if ipv4_source:
+            ipv4_addr = self._get_ip_for_source(ipv4_source, device_ipv4, 'ipv4')
+            if ipv4_addr:
+                if self._update_dns_record(zone_id, hostname, ipv4_addr, 'A'):
+                    updated = True
+            else:
+                self.logger.debug(f"No IPv4 available for {device_name}, skipping A record for {hostname}")
+
+        # Handle AAAA record (IPv6)
+        ipv6_source = record_config.get('ipv6')
+        if ipv6_source:
+            ipv6_addr = self._get_ip_for_source(ipv6_source, device_ipv6, 'ipv6')
+            if ipv6_addr:
+                if self._update_dns_record(zone_id, hostname, ipv6_addr, 'AAAA'):
+                    updated = True
+            else:
+                self.logger.debug(f"No IPv6 available for {device_name}, skipping AAAA record for {hostname}")
 
         return updated
 
-    def _update_cloudflare_record_helper(self, zone_id: str, hostname: str, ip: str, record_type: str) -> bool:
+    def _get_ip_for_source(
+        self,
+        source: Any,
+        device_ip: Optional[str],
+        ip_type: str
+    ) -> Optional[str]:
+        """
+        Get IP address based on source configuration.
+
+        Args:
+            source: 'wan', 'device', True, or False
+            device_ip: IP from UniFi device (if available)
+            ip_type: 'ipv4' or 'ipv6'
+
+        Returns:
+            IP address string or None
+        """
+        if source == 'wan':
+            if ip_type == 'ipv4':
+                return self.external_ip.get_ipv4()
+            else:
+                return self.external_ip.get_ipv6()
+        elif source in ('device', True):
+            return device_ip
+        return None
+
+    def _update_dns_record(self, zone_id: str, hostname: str, content: str, record_type: str) -> bool:
         """
         Update or create a DNS record.
+
+        Args:
+            zone_id: Cloudflare zone ID
+            hostname: Full hostname for the record
+            content: Record content (IP for A/AAAA, target hostname for CNAME)
+            record_type: 'A', 'AAAA', or 'CNAME'
 
         Returns:
             bool: True if update was performed
@@ -631,8 +787,8 @@ class DDNSUpdater:
 
         if dns_record:
             # Check if update is needed
-            if self.only_update_if_changed and dns_record.content == ip:
-                self.logger.debug(f"No change for {hostname} ({record_type}): {ip}")
+            if self.only_update_if_changed and dns_record.content == content:
+                self.logger.debug(f"No change for {hostname} ({record_type}): {content}")
                 return False
 
             # Update existing record
@@ -640,23 +796,23 @@ class DDNSUpdater:
                 zone_id=zone_id,
                 record_id=dns_record.id,
                 name=hostname,
-                ip=ip,
+                content=content,
                 record_type=record_type,
                 ttl=self.ttl
             )
             self.logger.info(
-                f"Updated {record_type} record for {hostname}: {dns_record.content} -> {ip}"
+                f"Updated {record_type} record for {hostname}: {dns_record.content} -> {content}"
             )
         else:
             # Create new record
             self.cf_client.create_dns_record(
                 zone_id=zone_id,
                 name=hostname,
-                ip=ip,
+                content=content,
                 record_type=record_type,
                 ttl=self.ttl
             )
-            self.logger.info(f"Created {record_type} record for {hostname}: {ip}")
+            self.logger.info(f"Created {record_type} record for {hostname}: {content}")
 
         return True
 

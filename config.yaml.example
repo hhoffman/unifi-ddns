@@ -1,7 +1,7 @@
 # Cloudflare DDNS Configuration Example
 # Copy this file to config.yaml and fill in your values
 
-# UniFi Controller Configuration
+# UniFi Controller Configuration (optional - only needed if using 'device' IP source)
 unifi:
   # UDM Pro hostname or IP address
   host: "192.168.1.1"
@@ -36,6 +36,11 @@ cloudflare:
   # Alternative: use environment variable
   # api_token_env: "CF_API_TOKEN"
 
+# External IP Service Configuration (optional - for 'wan' IP source)
+external_ip:
+  ipv4_url: "https://api.ipify.org"     # Service that returns your public IPv4
+  ipv6_url: "https://api6.ipify.org"    # Service that returns your public IPv6
+
 # Logging Configuration
 logging:
   level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -50,47 +55,92 @@ settings:
   only_update_if_changed: true  # Skip API call if IP hasn't changed
 
 # Device to DNS Record Mappings
-# Map UniFi devices (by MAC address) to Cloudflare DNS records
+#
+# IP Source Options:
+#   ipv4: wan      - Use public IPv4 from external service (ipify.org)
+#   ipv4: device   - Use device's IPv4 from UniFi (requires MAC) - usually private IP
+#   ipv4: true     - Same as 'device' (backward compatible)
+#   ipv4: false    - Don't create A record (or omit the field)
+#
+#   ipv6: wan      - Use public IPv6 from external service (api6.ipify.org)
+#   ipv6: device   - Use device's IPv6 from UniFi (requires MAC)
+#   ipv6: true     - Same as 'device' (backward compatible)
+#   ipv6: false    - Don't create AAAA record (or omit the field)
+#
+#   cname: "target.hostname.com" - Create CNAME record (cannot be used with ipv4/ipv6)
+#
+# Notes:
+#   - 'mac' is only required when using 'device' (or true) as IP source
+#   - CNAME records cannot coexist with A/AAAA records on the same hostname
+
 devices:
-  # Example 1: Docker server with both IPv4 and IPv6
+  # Example 1: Main domain using WAN IPs from external service (no MAC needed)
+  - name: "Main Domain"
+    records:
+      - domain: example.com
+        hostname: example.com
+        ipv4: wan       # Public IPv4 from ipify.org
+        ipv6: wan       # Public IPv6 from api6.ipify.org
+
+  # Example 2: Server behind NAT - WAN IPv4, device IPv6 from UniFi
   - mac: "aa:bb:cc:dd:ee:ff"
-    name: "Docker Server 01"  # Friendly name for logs
+    name: "Docker Server 00"
     records:
       - domain: example.com
-        hostname: docker01.example.com
-        ipv4: true
-        ipv6: true
+        hostname: docker-00.example.com
+        ipv4: wan       # Public IPv4 (same for all NAT'd devices)
+        ipv6: device    # Device's IPv6 from UniFi
 
-  # Example 2: Web server with only IPv4
+  # Example 3: Another server with same pattern
   - mac: "11:22:33:44:55:66"
-    name: "Web Server"
+    name: "Docker Server 01"
     records:
       - domain: example.com
-        hostname: web.example.com
-        ipv4: true
-        ipv6: false
+        hostname: docker-01.example.com
+        ipv4: wan       # Public IPv4
+        ipv6: device    # Device's IPv6 from UniFi
 
-  # Example 3: Multiple DNS records for one device
-  - mac: "77:88:99:aa:bb:cc"
+  # Example 4: CNAME alias (no MAC needed, no IP lookups)
+  - name: "WWW Alias"
+    records:
+      - domain: example.com
+        hostname: www.example.com
+        cname: "example.com"   # Points to main domain
+
+  # Example 5: Device with only IPv6 (IPv6-only network)
+  - mac: "22:33:44:55:66:77"
+    name: "IPv6 Only Server"
+    records:
+      - domain: example.com
+        hostname: v6only.example.com
+        ipv6: device    # Only AAAA record
+
+  # Example 6: Legacy config (backward compatible - 'true' means 'device')
+  - mac: "33:44:55:66:77:88"
+    name: "Legacy Config Server"
+    records:
+      - domain: example.com
+        hostname: legacy.example.com
+        ipv4: true      # Same as 'device' - gets IP from UniFi
+        ipv6: true      # Same as 'device' - gets IP from UniFi
+
+  # Example 7: Multiple hostnames for one device
+  - mac: "44:55:66:77:88:99"
     name: "Multi-hostname Server"
     records:
       # Primary hostname
       - domain: example.com
         hostname: server.example.com
-        ipv4: true
-        ipv6: true
+        ipv4: wan
+        ipv6: device
 
-      # Alternate hostname (www)
+      # API subdomain (same IPs)
       - domain: example.com
-        hostname: www.example.com
-        ipv4: true
-        ipv6: true
+        hostname: api.example.com
+        ipv4: wan
+        ipv6: device
 
-  # Add more devices as needed
-  # - mac: "device_mac_address"
-  #   name: "Friendly Name"
-  #   records:
-  #     - domain: your-domain.com
-  #       hostname: subdomain.your-domain.com
-  #       ipv4: true
-  #       ipv6: true
+      # Admin alias (CNAME to primary)
+      - domain: example.com
+        hostname: admin.example.com
+        cname: "server.example.com"
